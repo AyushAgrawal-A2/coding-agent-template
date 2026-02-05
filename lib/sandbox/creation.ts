@@ -83,11 +83,11 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
       teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
       projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
       token: process.env.SANDBOX_VERCEL_TOKEN!,
+      source: { type: 'snapshot', snapshotId: process.env.SANDBOX_SNAPSHOT_ID! },
       timeout: timeoutMs,
       ports: defaultPorts,
-      runtime: config.runtime || 'node22',
       resources: { vcpus: config.resources?.vcpus || 4 },
-    }
+    } as const
 
     // Call progress callback before sandbox creation
     if (config.onProgress) {
@@ -504,88 +504,25 @@ fi
 
     // Install agent-browser if enabled
     if (config.enableBrowser) {
-      await logger.info('Installing agent-browser for browser automation...')
+      await logger.info('agent-browser installed globally')
 
-      if (config.onProgress) {
-        await config.onProgress(42, 'Installing browser dependencies...')
-      }
+      // Download Chromium for agent-browser
+      await logger.info('Downloading Chromium for agent-browser...')
+      const chromiumInstall = await runCommandInSandbox(sandbox, 'agent-browser', ['install'])
 
-      // Install system dependencies for Chromium (Fedora-based sandbox)
-      await logger.info('Installing system dependencies for Chromium...')
-
-      // Clean dnf cache first to avoid corruption issues
-      await runCommandInSandbox(sandbox, 'sh', ['-c', 'sudo dnf clean all 2>&1'])
-
-      // Critical packages for Chromium - install in groups to be resilient
-      const criticalDeps = ['nss', 'nspr']
-      const displayDeps = ['libxkbcommon', 'atk', 'at-spi2-atk', 'at-spi2-core']
-      const xDeps = [
-        'libXcomposite',
-        'libXdamage',
-        'libXrandr',
-        'libXfixes',
-        'libXcursor',
-        'libXi',
-        'libXtst',
-        'libXScrnSaver',
-        'libXext',
-      ]
-      const graphicsDeps = ['mesa-libgbm', 'libdrm', 'mesa-libGL', 'mesa-libEGL']
-      const otherDeps = ['cups-libs', 'alsa-lib', 'pango', 'cairo', 'gtk3', 'dbus-libs']
-
-      // Install critical deps first
-      const criticalResult = await runCommandInSandbox(sandbox, 'sh', [
-        '-c',
-        `sudo dnf install -y ${criticalDeps.join(' ')} 2>&1`,
-      ])
-      if (!criticalResult.success) {
-        await runCommandInSandbox(sandbox, 'sh', [
-          '-c',
-          `sudo dnf install -y --allowerasing ${criticalDeps.join(' ')} 2>&1`,
-        ])
-      }
-
-      // Install other deps with --skip-broken
-      const allOtherDeps = [...displayDeps, ...xDeps, ...graphicsDeps, ...otherDeps]
-      await runCommandInSandbox(sandbox, 'sh', [
-        '-c',
-        `sudo dnf install -y --skip-broken ${allOtherDeps.join(' ')} 2>&1`,
-      ])
-
-      // Run ldconfig to update library cache
-      await runCommandInSandbox(sandbox, 'sh', ['-c', 'sudo ldconfig 2>&1'])
-
-      await logger.info('System dependencies installed')
-
-      // Install agent-browser globally
-      if (config.onProgress) {
-        await config.onProgress(44, 'Installing agent-browser...')
-      }
-
-      const agentBrowserInstall = await runCommandInSandbox(sandbox, 'npm', ['install', '-g', 'agent-browser'])
-
-      if (!agentBrowserInstall.success) {
-        await logger.info('Warning: Failed to install agent-browser globally')
+      if (!chromiumInstall.success) {
+        await logger.info('Warning: Failed to download Chromium for agent-browser')
       } else {
-        await logger.info('agent-browser installed globally')
+        await logger.info('Chromium downloaded successfully for agent-browser')
+      }
 
-        // Download Chromium for agent-browser
-        await logger.info('Downloading Chromium for agent-browser...')
-        const chromiumInstall = await runCommandInSandbox(sandbox, 'agent-browser', ['install'])
+      // Create the agent-browser skill file based on the selected agent
+      await logger.info('Creating agent-browser skill for coding agent...')
 
-        if (!chromiumInstall.success) {
-          await logger.info('Warning: Failed to download Chromium for agent-browser')
-        } else {
-          await logger.info('Chromium downloaded successfully for agent-browser')
-        }
+      const agentType = config.selectedAgent || 'claude'
 
-        // Create the agent-browser skill file based on the selected agent
-        await logger.info('Creating agent-browser skill for coding agent...')
-
-        const agentType = config.selectedAgent || 'claude'
-
-        // Skill content with YAML front matter (Claude format)
-        const claudeSkillContent = `---
+      // Skill content with YAML front matter (Claude format)
+      const claudeSkillContent = `---
 name: agent-browser
 description: Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use when the user needs to navigate websites, interact with web pages, fill forms, take screenshots, test web applications, or extract information from web pages.
 allowed-tools: Bash(agent-browser:*)
@@ -674,8 +611,8 @@ agent-browser snapshot -i  # Check result
 \`\`\`
 `
 
-        // Generic instructions content (for agents without skill file support)
-        const genericInstructions = `You have access to the agent-browser CLI for browser automation.
+      // Generic instructions content (for agents without skill file support)
+      const genericInstructions = `You have access to the agent-browser CLI for browser automation.
 
 Quick start:
 - agent-browser open <url>        # Navigate to page
@@ -687,38 +624,38 @@ Workflow: open URL -> snapshot -i -> interact with @refs -> re-snapshot after ch
 
 Key commands: open, snapshot -i, click, fill, type, press, get text/value/title/url, screenshot, wait`
 
-        let skillInstalled = false
+      let skillInstalled = false
 
-        if (agentType === 'claude') {
-          // Claude: Use .claude/skills directory
-          const skillDir = '/home/vercel-sandbox/.claude/skills/agent-browser'
-          const createSkillDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', skillDir])
-          if (createSkillDir.success) {
-            const writeSkillCmd = `cat > ${skillDir}/SKILL.md << 'SKILL_EOF'
+      if (agentType === 'claude') {
+        // Claude: Use .claude/skills directory
+        const skillDir = '/home/vercel-sandbox/.claude/skills/agent-browser'
+        const createSkillDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', skillDir])
+        if (createSkillDir.success) {
+          const writeSkillCmd = `cat > ${skillDir}/SKILL.md << 'SKILL_EOF'
 ${claudeSkillContent}
 SKILL_EOF`
-            const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeSkillCmd])
-            skillInstalled = writeSkill.success
-          }
-        } else if (agentType === 'gemini') {
-          // Gemini: Use .gemini directory with AGENTS.md
-          const geminiDir = '/home/vercel-sandbox/.gemini'
-          const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', geminiDir])
-          if (createDir.success) {
-            const writeCmd = `cat > ${geminiDir}/AGENTS.md << 'SKILL_EOF'
+          const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeSkillCmd])
+          skillInstalled = writeSkill.success
+        }
+      } else if (agentType === 'gemini') {
+        // Gemini: Use .gemini directory with AGENTS.md
+        const geminiDir = '/home/vercel-sandbox/.gemini'
+        const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', geminiDir])
+        if (createDir.success) {
+          const writeCmd = `cat > ${geminiDir}/AGENTS.md << 'SKILL_EOF'
 # Browser Automation Skill
 
 ${genericInstructions}
 SKILL_EOF`
-            const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
-            skillInstalled = writeSkill.success
-          }
-        } else if (agentType === 'cursor') {
-          // Cursor: Use .cursor/rules directory
-          const cursorDir = '/home/vercel-sandbox/.cursor/rules'
-          const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', cursorDir])
-          if (createDir.success) {
-            const writeCmd = `cat > ${cursorDir}/agent-browser.mdc << 'SKILL_EOF'
+          const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
+          skillInstalled = writeSkill.success
+        }
+      } else if (agentType === 'cursor') {
+        // Cursor: Use .cursor/rules directory
+        const cursorDir = '/home/vercel-sandbox/.cursor/rules'
+        const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', cursorDir])
+        if (createDir.success) {
+          const writeCmd = `cat > ${cursorDir}/agent-browser.mdc << 'SKILL_EOF'
 ---
 description: Browser automation with agent-browser CLI
 globs: ["**/*"]
@@ -727,34 +664,24 @@ alwaysApply: true
 
 ${genericInstructions}
 SKILL_EOF`
-            const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
-            skillInstalled = writeSkill.success
-          }
-        } else if (agentType === 'codex') {
-          // Codex: Use AGENTS.md in home directory
-          const writeCmd = `cat > /home/vercel-sandbox/AGENTS.md << 'SKILL_EOF'
-# Browser Automation
-
-${genericInstructions}
-SKILL_EOF`
           const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
           skillInstalled = writeSkill.success
-        } else if (agentType === 'copilot') {
-          // Copilot: Use .github/copilot-instructions.md
-          const ghDir = '/home/vercel-sandbox/.github'
-          const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', ghDir])
-          if (createDir.success) {
-            const writeCmd = `cat > ${ghDir}/copilot-instructions.md << 'SKILL_EOF'
+        }
+      } else if (agentType === 'codex') {
+        // Codex: Use AGENTS.md in home directory
+        const writeCmd = `cat > /home/vercel-sandbox/AGENTS.md << 'SKILL_EOF'
 # Browser Automation
 
 ${genericInstructions}
 SKILL_EOF`
-            const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
-            skillInstalled = writeSkill.success
-          }
-        } else if (agentType === 'opencode') {
-          // OpenCode: Use AGENTS.md in home directory
-          const writeCmd = `cat > /home/vercel-sandbox/AGENTS.md << 'SKILL_EOF'
+        const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
+        skillInstalled = writeSkill.success
+      } else if (agentType === 'copilot') {
+        // Copilot: Use .github/copilot-instructions.md
+        const ghDir = '/home/vercel-sandbox/.github'
+        const createDir = await runCommandInSandbox(sandbox, 'mkdir', ['-p', ghDir])
+        if (createDir.success) {
+          const writeCmd = `cat > ${ghDir}/copilot-instructions.md << 'SKILL_EOF'
 # Browser Automation
 
 ${genericInstructions}
@@ -762,12 +689,21 @@ SKILL_EOF`
           const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
           skillInstalled = writeSkill.success
         }
+      } else if (agentType === 'opencode') {
+        // OpenCode: Use AGENTS.md in home directory
+        const writeCmd = `cat > /home/vercel-sandbox/AGENTS.md << 'SKILL_EOF'
+# Browser Automation
 
-        if (skillInstalled) {
-          await logger.info('agent-browser skill created successfully')
-        } else {
-          await logger.info('Warning: Failed to create agent-browser skill file')
-        }
+${genericInstructions}
+SKILL_EOF`
+        const writeSkill = await runCommandInSandbox(sandbox, 'sh', ['-c', writeCmd])
+        skillInstalled = writeSkill.success
+      }
+
+      if (skillInstalled) {
+        await logger.info('agent-browser skill created successfully')
+      } else {
+        await logger.info('Warning: Failed to create agent-browser skill file')
       }
     }
 
